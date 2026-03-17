@@ -1,203 +1,386 @@
 const express = require('express');
-const { db, Project, Task } = require('./database/setup');
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+const bcrypt = require('bcryptjs');
+const session = require('express-session');
+const SQLiteStore = require('connect-sqlite3')(session);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const DB_PATH = path.join(__dirname, 'database', 'task_management.db');
 
 // Middleware
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Test database connection
-async function testConnection() {
-    try {
-        await db.authenticate();
-        console.log('Connection to database established successfully.');
-    } catch (error) {
-        console.error('Unable to connect to the database:', error);
-    }
-}
+// Session middleware
+app.use(session({
+  store: new SQLiteStore({ db: 'sessions.db', dir: './database' }),
+  secret: process.env.SESSION_SECRET || 'dev_secret_key',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { 
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 1 week
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production'
+  }
+}));
 
-testConnection();
-
-// PROJECT ROUTES
-
-// GET /api/projects - Get all projects
-app.get('/api/projects', async (req, res) => {
-    try {
-        const projects = await Project.findAll();
-        res.json(projects);
-    } catch (error) {
-        console.error('Error fetching projects:', error);
-        res.status(500).json({ error: 'Failed to fetch projects' });
-    }
+// Database connection
+const db = new sqlite3.Database(DB_PATH, (err) => {
+  if (err) {
+    console.error('Database connection error:', err);
+  } else {
+    console.log('Connected to SQLite database');
+  }
 });
 
-// GET /api/projects/:id - Get project by ID
-app.get('/api/projects/:id', async (req, res) => {
-    try {
-        const project = await Project.findByPk(req.params.id);
-        
-        if (!project) {
-            return res.status(404).json({ error: 'Project not found' });
+// ============ AUTHENTICATION MIDDLEWARE ============
+const requireAuth = (req, res, next) => {
+  if (!req.session.userId) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  
+  // Attach user info to request for use in routes
+  db.get('SELECT id, username, email FROM users WHERE id = ?', 
+    [req.session.userId], 
+    (err, user) => {
+      if (err || !user) {
+        req.session.destroy();
+        return res.status(401).json({ error: 'User not found' });
+      }
+      req.user = user;
+      next();
+    }
+  );
+};
+
+// ============ AUTHENTICATION ROUTES ============
+
+// REGISTER - POST /api/register
+app.post('/api/register', async (req, res) => {
+  const { username, email, password } = req.body;
+  
+  // Validation
+  if (!username || !email || !password) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
+  
+  try {
+    // Check if user already exists
+    db.get('SELECT id FROM users WHERE email = ?', [email], async (err, existingUser) => {
+      if (err) {
+        return res.status(500).json({ error: 'Database error' });
+      }
+      
+      if (existingUser) {
+        return res.status(400).json({ error: 'Email already registered' });
+      }
+      
+      // Hash password
+      const hashedPassword = await bcrypt.hash(password, 10);
+      
+      // Insert new user
+      db.run(
+        'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
+        [username, email, hashedPassword],
+        function(err) {
+          if (err) {
+            return res.status(500).json({ error: 'Failed to create user' });
+          }
+          
+          res.status(201).json({ 
+            message: 'User registered successfully',
+            userId: this.lastID 
+          });
         }
-        
+      );
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+// LOGIN - POST /api/login
+app.post('/api/login', (req, res) => {
+  const { email, password } = req.body;
+  
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password required' });
+  }
+  
+  // Find user by email
+  db.get('SELECT * FROM users WHERE email = ?', [email], async (err, user) => {
+    if (err) {
+      return res.status(500).json({ error: 'Database error' });
+    }
+    
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    
+    // Compare passwords
+    const validPassword = await bcrypt.compare(password, user.password);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    
+    // Create session
+    req.session.userId = user.id;
+    req.session.username = user.username;
+    
+    res.json({ 
+      message: 'Login successful',
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email
+      }
+    });
+  });
+});
+
+// LOGOUT - POST /api/logout
+app.post('/api/logout', (req, res) => {
+  req.session.destroy((err) => {
+    if (err) {
+      return res.status(500).json({ error: 'Could not log out' });
+    }
+    
+    res.clearCookie('connect.sid');
+    res.json({ message: 'Logout successful' });
+  });
+});
+
+// CHECK SESSION - GET /api/me (optional, for testing)
+app.get('/api/me', requireAuth, (req, res) => {
+  res.json({ user: req.user });
+});
+
+// ============ PROTECTED PROJECT ROUTES ============
+
+// GET all projects for authenticated user
+app.get('/api/projects', requireAuth, (req, res) => {
+  db.all(
+    `SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC`,
+    [req.user.id],
+    (err, projects) => {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to fetch projects' });
+      }
+      res.json(projects);
+    }
+  );
+});
+
+// GET single project (verify ownership)
+app.get('/api/projects/:id', requireAuth, (req, res) => {
+  db.get(
+    `SELECT * FROM projects WHERE id = ? AND user_id = ?`,
+    [req.params.id, req.user.id],
+    (err, project) => {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to fetch project' });
+      }
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found' });
+      }
+      res.json(project);
+    }
+  );
+});
+
+// CREATE new project
+app.post('/api/projects', requireAuth, (req, res) => {
+  const { name, description } = req.body;
+  
+  if (!name) {
+    return res.status(400).json({ error: 'Project name is required' });
+  }
+  
+  db.run(
+    `INSERT INTO projects (name, description, user_id) VALUES (?, ?, ?)`,
+    [name, description, req.user.id],
+    function(err) {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to create project' });
+      }
+      
+      db.get(`SELECT * FROM projects WHERE id = ?`, [this.lastID], (err, project) => {
+        if (err) {
+          return res.status(500).json({ error: 'Project created but failed to retrieve' });
+        }
+        res.status(201).json(project);
+      });
+    }
+  );
+});
+
+// UPDATE project (verify ownership)
+app.put('/api/projects/:id', requireAuth, (req, res) => {
+  const { name, description } = req.body;
+  
+  db.run(
+    `UPDATE projects SET name = COALESCE(?, name), 
+        description = COALESCE(?, description), 
+        updated_at = CURRENT_TIMESTAMP 
+     WHERE id = ? AND user_id = ?`,
+    [name, description, req.params.id, req.user.id],
+    function(err) {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to update project' });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Project not found or access denied' });
+      }
+      
+      db.get(`SELECT * FROM projects WHERE id = ?`, [req.params.id], (err, project) => {
         res.json(project);
-    } catch (error) {
-        console.error('Error fetching project:', error);
-        res.status(500).json({ error: 'Failed to fetch project' });
+      });
     }
+  );
 });
 
-// POST /api/projects - Create new project
-app.post('/api/projects', async (req, res) => {
-    try {
-        const { name, description, status, dueDate } = req.body;
-        
-        const newProject = await Project.create({
-            name,
-            description,
-            status,
-            dueDate
-        });
-        
-        res.status(201).json(newProject);
-    } catch (error) {
-        console.error('Error creating project:', error);
-        res.status(500).json({ error: 'Failed to create project' });
+// DELETE project (verify ownership)
+app.delete('/api/projects/:id', requireAuth, (req, res) => {
+  db.run(
+    `DELETE FROM projects WHERE id = ? AND user_id = ?`,
+    [req.params.id, req.user.id],
+    function(err) {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to delete project' });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Project not found or access denied' });
+      }
+      res.json({ message: 'Project deleted successfully' });
     }
+  );
 });
 
-// PUT /api/projects/:id - Update existing project
-app.put('/api/projects/:id', async (req, res) => {
-    try {
-        const { name, description, status, dueDate } = req.body;
-        
-        const [updatedRowsCount] = await Project.update(
-            { name, description, status, dueDate },
-            { where: { id: req.params.id } }
-        );
-        
-        if (updatedRowsCount === 0) {
-            return res.status(404).json({ error: 'Project not found' });
+// ============ TASK ROUTES (also protected via project ownership) ============
+
+// GET tasks for a specific project (verify project ownership)
+app.get('/api/projects/:projectId/tasks', requireAuth, (req, res) => {
+  // First verify project ownership
+  db.get(
+    `SELECT id FROM projects WHERE id = ? AND user_id = ?`,
+    [req.params.projectId, req.user.id],
+    (err, project) => {
+      if (err || !project) {
+        return res.status(404).json({ error: 'Project not found or access denied' });
+      }
+      
+      // Then fetch tasks
+      db.all(
+        `SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at DESC`,
+        [req.params.projectId],
+        (err, tasks) => {
+          if (err) {
+            return res.status(500).json({ error: 'Failed to fetch tasks' });
+          }
+          res.json(tasks);
         }
-        
-        const updatedProject = await Project.findByPk(req.params.id);
-        res.json(updatedProject);
-    } catch (error) {
-        console.error('Error updating project:', error);
-        res.status(500).json({ error: 'Failed to update project' });
+      );
     }
+  );
 });
 
-// DELETE /api/projects/:id - Delete project
-app.delete('/api/projects/:id', async (req, res) => {
-    try {
-        const deletedRowsCount = await Project.destroy({
-            where: { id: req.params.id }
-        });
-        
-        if (deletedRowsCount === 0) {
-            return res.status(404).json({ error: 'Project not found' });
+// CREATE task for a project
+app.post('/api/projects/:projectId/tasks', requireAuth, (req, res) => {
+  const { title, description } = req.body;
+  
+  if (!title) {
+    return res.status(400).json({ error: 'Task title is required' });
+  }
+  
+  // Verify project ownership first
+  db.get(
+    `SELECT id FROM projects WHERE id = ? AND user_id = ?`,
+    [req.params.projectId, req.user.id],
+    (err, project) => {
+      if (err || !project) {
+        return res.status(404).json({ error: 'Project not found or access denied' });
+      }
+      
+      db.run(
+        `INSERT INTO tasks (title, description, project_id) VALUES (?, ?, ?)`,
+        [title, description, req.params.projectId],
+        function(err) {
+          if (err) {
+            return res.status(500).json({ error: 'Failed to create task' });
+          }
+          
+          db.get(`SELECT * FROM tasks WHERE id = ?`, [this.lastID], (err, task) => {
+            res.status(201).json(task);
+          });
         }
-        
-        res.json({ message: 'Project deleted successfully' });
-    } catch (error) {
-        console.error('Error deleting project:', error);
-        res.status(500).json({ error: 'Failed to delete project' });
+      );
     }
+  );
 });
 
-// TASK ROUTES
-
-// GET /api/tasks - Get all tasks
-app.get('/api/tasks', async (req, res) => {
-    try {
-        const tasks = await Task.findAll();
-        res.json(tasks);
-    } catch (error) {
-        console.error('Error fetching tasks:', error);
-        res.status(500).json({ error: 'Failed to fetch tasks' });
-    }
-});
-
-// GET /api/tasks/:id - Get task by ID
-app.get('/api/tasks/:id', async (req, res) => {
-    try {
-        const task = await Task.findByPk(req.params.id);
-        
-        if (!task) {
-            return res.status(404).json({ error: 'Task not found' });
+// UPDATE task
+app.put('/api/tasks/:id', requireAuth, (req, res) => {
+  const { title, description, completed } = req.body;
+  
+  // Verify task belongs to user's project
+  db.get(
+    `SELECT t.* FROM tasks t
+     JOIN projects p ON t.project_id = p.id
+     WHERE t.id = ? AND p.user_id = ?`,
+    [req.params.id, req.user.id],
+    (err, task) => {
+      if (err || !task) {
+        return res.status(404).json({ error: 'Task not found or access denied' });
+      }
+      
+      db.run(
+        `UPDATE tasks SET 
+          title = COALESCE(?, title),
+          description = COALESCE(?, description),
+          completed = COALESCE(?, completed),
+          updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [title, description, completed, req.params.id],
+        function(err) {
+          if (err) {
+            return res.status(500).json({ error: 'Failed to update task' });
+          }
+          
+          db.get(`SELECT * FROM tasks WHERE id = ?`, [req.params.id], (err, updatedTask) => {
+            res.json(updatedTask);
+          });
         }
-        
-        res.json(task);
-    } catch (error) {
-        console.error('Error fetching task:', error);
-        res.status(500).json({ error: 'Failed to fetch task' });
+      );
     }
+  );
 });
 
-// POST /api/tasks - Create new task
-app.post('/api/tasks', async (req, res) => {
-    try {
-        const { title, description, completed, priority, dueDate, projectId } = req.body;
-        
-        const newTask = await Task.create({
-            title,
-            description,
-            completed,
-            priority,
-            dueDate,
-            projectId
-        });
-        
-        res.status(201).json(newTask);
-    } catch (error) {
-        console.error('Error creating task:', error);
-        res.status(500).json({ error: 'Failed to create task' });
-    }
-});
-
-// PUT /api/tasks/:id - Update existing task
-app.put('/api/tasks/:id', async (req, res) => {
-    try {
-        const { title, description, completed, priority, dueDate, projectId } = req.body;
-        
-        const [updatedRowsCount] = await Task.update(
-            { title, description, completed, priority, dueDate, projectId },
-            { where: { id: req.params.id } }
-        );
-        
-        if (updatedRowsCount === 0) {
-            return res.status(404).json({ error: 'Task not found' });
+// DELETE task
+app.delete('/api/tasks/:id', requireAuth, (req, res) => {
+  // Verify task belongs to user's project
+  db.get(
+    `SELECT t.id FROM tasks t
+     JOIN projects p ON t.project_id = p.id
+     WHERE t.id = ? AND p.user_id = ?`,
+    [req.params.id, req.user.id],
+    (err, task) => {
+      if (err || !task) {
+        return res.status(404).json({ error: 'Task not found or access denied' });
+      }
+      
+      db.run(`DELETE FROM tasks WHERE id = ?`, [req.params.id], function(err) {
+        if (err) {
+          return res.status(500).json({ error: 'Failed to delete task' });
         }
-        
-        const updatedTask = await Task.findByPk(req.params.id);
-        res.json(updatedTask);
-    } catch (error) {
-        console.error('Error updating task:', error);
-        res.status(500).json({ error: 'Failed to update task' });
-    }
-});
-
-// DELETE /api/tasks/:id - Delete task
-app.delete('/api/tasks/:id', async (req, res) => {
-    try {
-        const deletedRowsCount = await Task.destroy({
-        where: { id: req.params.id }
-        });
-        
-        if (deletedRowsCount === 0) {
-            return res.status(404).json({ error: 'Task not found' });
-        }
-        
         res.json({ message: 'Task deleted successfully' });
-    } catch (error) {
-        console.error('Error deleting task:', error);
-        res.status(500).json({ error: 'Failed to delete task' });
+      });
     }
+  );
 });
 
 // Start server
 app.listen(PORT, () => {
-    console.log(`Server running on port http://localhost:${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
