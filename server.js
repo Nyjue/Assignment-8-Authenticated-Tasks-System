@@ -9,29 +9,33 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const DB_PATH = path.join(__dirname, 'database', 'task_management.db');
 
-// Middleware
+// ============ MIDDLEWARE ============
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Session middleware
 app.use(session({
-  store: new SQLiteStore({ db: 'sessions.db', dir: './database' }),
-  secret: process.env.SESSION_SECRET || 'dev_secret_key',
+  store: new SQLiteStore({ 
+    db: 'sessions.db', 
+    dir: './database',
+    table: 'sessions'
+  }),
+  secret: process.env.SESSION_SECRET || 'dev_secret_key_change_this',
   resave: false,
   saveUninitialized: false,
   cookie: { 
     maxAge: 7 * 24 * 60 * 60 * 1000, // 1 week
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production'
+    secure: false // Set to true only if using HTTPS
   }
 }));
 
 // Database connection
 const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) {
-    console.error('Database connection error:', err);
+    console.error('❌ Database connection error:', err);
   } else {
-    console.log('Connected to SQLite database');
+    console.log('✅ Connected to SQLite database');
   }
 });
 
@@ -90,7 +94,7 @@ app.post('/api/register', async (req, res) => {
           }
           
           res.status(201).json({ 
-            message: 'User registered successfully',
+            message: '✅ User registered successfully',
             userId: this.lastID 
           });
         }
@@ -130,7 +134,7 @@ app.post('/api/login', (req, res) => {
     req.session.username = user.username;
     
     res.json({ 
-      message: 'Login successful',
+      message: '✅ Login successful',
       user: {
         id: user.id,
         username: user.username,
@@ -148,11 +152,11 @@ app.post('/api/logout', (req, res) => {
     }
     
     res.clearCookie('connect.sid');
-    res.json({ message: 'Logout successful' });
+    res.json({ message: '✅ Logout successful' });
   });
 });
 
-// CHECK SESSION - GET /api/me (optional, for testing)
+// CHECK SESSION - GET /api/me (useful for testing)
 app.get('/api/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
@@ -253,12 +257,12 @@ app.delete('/api/projects/:id', requireAuth, (req, res) => {
       if (this.changes === 0) {
         return res.status(404).json({ error: 'Project not found or access denied' });
       }
-      res.json({ message: 'Project deleted successfully' });
+      res.json({ message: '✅ Project deleted successfully' });
     }
   );
 });
 
-// ============ TASK ROUTES (also protected via project ownership) ============
+// ============ PROTECTED TASK ROUTES ============
 
 // GET tasks for a specific project (verify project ownership)
 app.get('/api/projects/:projectId/tasks', requireAuth, (req, res) => {
@@ -320,11 +324,11 @@ app.post('/api/projects/:projectId/tasks', requireAuth, (req, res) => {
   );
 });
 
-// UPDATE task
+// UPDATE task (verify task belongs to user's project)
 app.put('/api/tasks/:id', requireAuth, (req, res) => {
   const { title, description, completed } = req.body;
   
-  // Verify task belongs to user's project
+  // First verify task belongs to user's project
   db.get(
     `SELECT t.* FROM tasks t
      JOIN projects p ON t.project_id = p.id
@@ -357,9 +361,9 @@ app.put('/api/tasks/:id', requireAuth, (req, res) => {
   );
 });
 
-// DELETE task
+// DELETE task (verify task belongs to user's project)
 app.delete('/api/tasks/:id', requireAuth, (req, res) => {
-  // Verify task belongs to user's project
+  // First verify task belongs to user's project
   db.get(
     `SELECT t.id FROM tasks t
      JOIN projects p ON t.project_id = p.id
@@ -374,13 +378,26 @@ app.delete('/api/tasks/:id', requireAuth, (req, res) => {
         if (err) {
           return res.status(500).json({ error: 'Failed to delete task' });
         }
-        res.json({ message: 'Task deleted successfully' });
+        res.json({ message: '✅ Task deleted successfully' });
       });
     }
   );
 });
 
-// Start server
+// ============ START SERVER ============
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`📝 API Endpoints:`);
+  console.log(`   POST   /api/register`);
+  console.log(`   POST   /api/login`);
+  console.log(`   POST   /api/logout`);
+  console.log(`   GET    /api/me (protected)`);
+  console.log(`   GET    /api/projects (protected)`);
+  console.log(`   POST   /api/projects (protected)`);
+  console.log(`   PUT    /api/projects/:id (protected)`);
+  console.log(`   DELETE /api/projects/:id (protected)`);
+  console.log(`   GET    /api/projects/:projectId/tasks (protected)`);
+  console.log(`   POST   /api/projects/:projectId/tasks (protected)`);
+  console.log(`   PUT    /api/tasks/:id (protected)`);
+  console.log(`   DELETE /api/tasks/:id (protected)`);
 });

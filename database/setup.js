@@ -1,15 +1,12 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
-const bcrypt = require('bcryptjs');
 
 const DB_PATH = path.join(__dirname, 'task_management.db');
-
-// Initialize database
 const db = new sqlite3.Database(DB_PATH);
 
-// Create tables
+// Serialize ensures sequential execution
 db.serialize(() => {
-  // Drop existing tables if they exist (for clean setup)
+  // Drop existing tables in reverse order (respect foreign keys)
   db.run(`DROP TABLE IF EXISTS tasks`);
   db.run(`DROP TABLE IF EXISTS projects`);
   db.run(`DROP TABLE IF EXISTS users`);
@@ -53,7 +50,8 @@ db.serialize(() => {
     )
   `);
 
-  console.log('Database setup completed successfully!');
+  console.log('✅ Database setup completed successfully!');
+  console.log('Tables created: users, projects, tasks');
 });
 
 db.close();
