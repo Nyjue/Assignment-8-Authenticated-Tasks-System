@@ -9,6 +9,26 @@
   "scripts": {
     "start": "node server.js",
     "setup": "node database/setup.js",
-    "seed": "node database/seed.js"
-  }
+    "seed": "node database/seed.js",
+    "test": "jest"
+  },
+  "name": "assignment-8-authenticated-tasks-system",
+  "version": "1.0.0",
+  "description": "A REST API for managing projects and tasks.",
+  "main": "server.js",
+  "devDependencies": {
+    "jest": "^30.5.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nyjue/Assignment-8-Authenticated-Tasks-System.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Nyjue/Assignment-8-Authenticated-Tasks-System/issues"
+  },
+  "homepage": "https://github.com/Nyjue/Assignment-8-Authenticated-Tasks-System#readme"
 }
